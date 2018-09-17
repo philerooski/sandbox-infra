@@ -1,0 +1,8 @@
+template_path: templates/mpower2-user-add.yaml
+stack_name: mpower2-user-add
+dependencies:
+  - essentials
+  - sandcastlevpc
+parameters:
+  ComputeImageId: ami-093381d21a4fc38d1
+  ContainerImage: philsnyder/mpower2-user-add

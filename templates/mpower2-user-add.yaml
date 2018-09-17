@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Batch jobs for adding users to At Home PD study.
+
+Parameters:
+  ComputeImageId:
+    Description: The image to use during Batch jobs
+    Type: 'AWS::EC2::Image::Id'
+  ContainerImage:
+    Description: The docker container image
+    Type: String
+
+Resources:
+  BatchServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::563295687221:role/service-role/AWSBatchServiceRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: batch.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+  BatchInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::563295687221:instance-profile/ecsInstanceRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: "/"
+  BatchInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref BatchInstanceRole
+  BatchComputeEnvironment:
+    Type: "AWS::Batch::ComputeEnvironment"
+    Properties:
+      Type: MANAGED
+      ServiceRole: !GetAtt BatchServiceRole.Arn
+      State: ENABLED
+      ComputeResources:
+        Type: EC2
+        MaxvCpus: 2
+        SecurityGroupIds:
+          - !ImportValue us-east-1-sandcastlevpc-VpnSecurityGroup
+        Subnets:
+          - !ImportValue us-east-1-sandcastlevpc-PrivateSubnet
+          - !ImportValue us-east-1-sandcastlevpc-PrivateSubnet1
+          - !ImportValue us-east-1-sandcastlevpc-PrivateSubnet2
+        MinvCpus: 1
+        ImageId: !Ref ComputeImageId
+        InstanceRole: !GetAtt BatchInstanceProfile.Arn
+        InstanceTypes:
+          - optimal
+        DesiredvCpus: 1
+  BatchJobQueue:
+    Type: "AWS::Batch::JobQueue"
+    Properties:
+      JobQueueName: !Join
+        - '-'
+        - - !Ref AWS::StackName
+          - "job"
+          - "queue"
+      ComputeEnvironmentOrder:
+        - ComputeEnvironment: !Ref BatchComputeEnvironment
+          Order: 1
+      Priority: 1
+      State: ENABLED
+  BatchJobDefinition:
+    Type: 'AWS::Batch::JobDefinition'
+    Properties:
+      Type: container
+      JobDefinitionName: !Join
+        - '-'
+        - - !Ref AWS::StackName
+          - "job"
+          - "definition"
+      ContainerProperties:
+        Image: !Ref ContainerImage
+        Vcpus: 1
+        Memory: 1000
+        Command:
+          - python
+          - /root/mpower2-user-add/user_add.py
+  SubmitBatchJobLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.6
+      Timeout: '10'
+      Handler: index.lambda_handler
+      Environment:
+        Variables:
+          JOB_NAME: !Join
+            - '-'
+            - - !Ref AWS::StackName
+              - "job"
+          JOB_QUEUE: !Join
+            - '-'
+            - - !Ref AWS::StackName
+              - "job"
+              - "queue"
+          JOB_DEFINITION: !Join
+            - '-'
+            - - !Ref AWS::StackName
+              - "job"
+              - "definition"
+      Code:
+        ZipFile: |
+          import boto3 as boto
+
+          def lambda_handler(event, context):
+              batch_client = boto.client('batch')
+              job = batch_client.submit_job(
+                  jobName = "user_add_scheduled_job",
+                  jobQueue = "mpower2-user-add",
+                  jobDefinition = "mpower2-user-add")
+              return job
+
+  PeriodicEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: "rate(1 minute)"
+      Targets:
+        - Arn: !GetAtt SubmitBatchJobLambda.Arn
+          Id: !Ref SubmitBatchJobLambda
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: PublishToCloudwatch
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: BatchJobAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - batch:DescribeJobs
+                  - batch:ListJobs
+                  - batch:SubmitJob
+                Resource: "*"
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SubmitBatchJobLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PeriodicEvent.Arn
+  SubmitBatchJobLambdaFailureAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmActions:
+        - !ImportValue us-east-1-AccountAlertTopics-SNSAlertsErrorArn
+      MetricName: !Sub "${SubmitBatchJobLambda}-FailureAlarm"
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref SubmitBatchJobLambda
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+Outputs:
+  SubmitBatchJobLambda:
+    Value: !Ref SubmitBatchJobLambda
+    Export:
+      Name: !Sub '${AWS::Region}-${AWS::StackName}-SubmitBatchJobLambda'
+  BatchComputeEnvironment:
+    Value: !Ref BatchComputeEnvironment
+    Export:
+      Name: !Sub '${AWS::Region}-${AWS::StackName}-BatchComputeEnvironment'
+  BatchJobQueue:
+    Value: !Ref BatchJobQueue
+    Export:
+      Name: !Sub '${AWS::Region}-${AWS::StackName}-BatchJobQueue'
+  BatchJobDefinition:
+    Value: !Ref BatchJobDefinition
+    Export:
+      Name: !Sub '${AWS::Region}-${AWS::StackName}-BatchJobDefinition'
