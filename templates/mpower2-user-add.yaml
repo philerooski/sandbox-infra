@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  A Reserved EC2 instance for adding users to the At Home PD study
+
+Resources:
+  EC2ReservedInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: EC2InstanceProfile
+      ImageId: ami-0254e5972ebcd132c
+      KeyName: phil-admin.pem
+      InstanceType: t3.micro
+      SecurityGroups:
+        - !ImportValue us-east-1-sandcastlevpc-VpnSecurityGroup
+      Subnets:
+        - !ImportValue us-east-1-sandcastlevpc-PrivateSubnet
+  EC2InstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: PublishToCloudwatch
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+  EC2InstanceProfile:
+      Type:  AWS::IAM::InstanceProfile
+      Properties:
+        Path: "/"
+        Roles:
+          - !Ref EC2InstanceRole
