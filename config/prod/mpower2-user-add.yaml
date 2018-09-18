@@ -1,0 +1,5 @@
+template_path: templates/mpower2-user-add.yaml
+stack_name: mpower2-user-add
+dependencies:
+  - essentials
+  - sandcastlevpc
